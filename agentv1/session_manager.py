@@ -1,6 +1,7 @@
 import json
 import time
 import os
+import base64
 import requests
 from typing import Optional
 from config import BOT_CONFIG, SERVER_CONFIG, COOKIE_CACHE_FILE
@@ -32,13 +33,14 @@ class SessionManager:
         except Exception as e:
             print(f"[Session] 保存cookie缓存失败: {e}")
 
-    def _login(self) -> Optional[str]:
+    def _login(self, oat: str = None) -> Optional[str]:
         username = BOT_CONFIG["username"]
-        access_token = BOT_CONFIG["access_token"]
+        # Use provided oat, or fallback to the one in config
+        ticket = oat or BOT_CONFIG["access_token"]
         login_url = SERVER_CONFIG["login_url"]
 
         session = requests.Session()
-        login_json = {"access_token": access_token, "username": username}
+        login_json = {"oa_ticket": ticket, "username": username}
 
         try:
             print(f"[Session] 尝试登录: {username}")
@@ -60,7 +62,12 @@ class SessionManager:
                 if "session" in cookies:
                     cookie_str = "session=" + cookies["session"]
                     print("[Session] 登录成功，获取新session")
-                    return cookie_str
+                    if self._test_cookie_online(cookie_str):
+                        print("[Session] 新cookie线上验证成功")
+                        return cookie_str
+                    else:
+                        print("[Session] 新cookie线上验证失败")
+                        return None
                 else:
                     print("[Session] 登录失败: 未获取到session cookie")
             else:
@@ -69,13 +76,13 @@ class SessionManager:
             print(f"[Session] 登录请求异常: {e}")
         return None
 
-    def _validate_cookie(self, cookie: str) -> bool:
+    def _test_cookie_online(self, cookie: str) -> bool:
         http_base = SERVER_CONFIG["http_base"]
         test_url = f"{http_base}/api/user"
 
         try:
             response = requests.get(test_url, headers={"Cookie": cookie}, timeout=5)
-            print(f"[Session] 验证cookie: HTTP {response.status_code}")
+            print(f"[Session] 线上验证cookie: HTTP {response.status_code}")
             if response.status_code == 200:
                 try:
                     data = response.json()
@@ -89,13 +96,60 @@ class SessionManager:
             print(f"[Session] 验证请求异常: {e}")
             return False
 
+    def _get_cookie_exp(self, cookie: str) -> float:
+        """解析JWT cookie获取过期时间，返回0表示解析失败"""
+        try:
+            if cookie.startswith("session="):
+                cookie = cookie[8:]
+            parts = cookie.split('.')
+            if len(parts) != 3:
+                return 0
+            payload_b64 = parts[1]
+            # 补充 base64 padding
+            payload_b64 += '=' * (-len(payload_b64) % 4)
+            payload_json = base64.urlsafe_b64decode(payload_b64).decode('utf-8')
+            payload = json.loads(payload_json)
+            return payload.get("exp", 0)
+        except Exception as e:
+            print(f"[Session] 解析JWT失败: {e}")
+            return 0
+
+    def _renew_cookie(self, old_cookie: str) -> Optional[str]:
+        http_base = SERVER_CONFIG["http_base"]
+        create_oat_url = f"{http_base}/api/oats"
+        
+        try:
+            print("[Session] 尝试创建新的 OAT 进行续签...")
+            response = requests.post(create_oat_url, headers={"Cookie": old_cookie}, data={"label": "Auto Renew Bot"}, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("success"):
+                    new_oat = data.get("ticket")
+                    print(f"[Session] 成功获取新的OAT: {new_oat}")
+                    return self._login(oat=new_oat)
+            print(f"[Session] 获取新OAT失败: {response.text}")
+        except Exception as e:
+            print(f"[Session] 自动续签异常: {e}")
+        return None
+
     def get_session(self, force_refresh: bool = False) -> Optional[str]:
         if not force_refresh and self._cached_cookie:
-            if self._cookie_timestamp and (time.time() - self._cookie_timestamp) < 7776000:
-                if self._validate_cookie(self._cached_cookie):
-                    return self._cached_cookie
-                else:
-                    print("[Session] 缓存cookie验证失败，尝试重新登录")
+            exp = self._get_cookie_exp(self._cached_cookie)
+            now = time.time()
+            if exp > now:
+                # 还有效，检查是否不足 10 天 (10天 = 864000秒)
+                if exp - now < 864000:
+                    print("[Session] 缓存cookie有效期不足10天，尝试自动续签...")
+                    new_cookie = self._renew_cookie(self._cached_cookie)
+                    if new_cookie:
+                        self._cached_cookie = new_cookie
+                        self._cookie_timestamp = time.time()
+                        self._save_cache(new_cookie)
+                    # 无论续签是否成功，因为还没过期，都可以继续使用目前的或续签后的
+                return self._cached_cookie
+            else:
+                print("[Session] 缓存cookie已过期，需要重新登录")
+                
         cookie = self._login()
         if cookie:
             self._cached_cookie = cookie
