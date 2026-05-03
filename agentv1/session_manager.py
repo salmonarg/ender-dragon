@@ -116,16 +116,30 @@ class SessionManager:
 
     def _renew_cookie(self, old_cookie: str) -> Optional[str]:
         http_base = SERVER_CONFIG["http_base"]
-        create_oat_url = f"{http_base}/api/oats"
+        oats_api_url = f"{http_base}/api/oats"
         
         try:
-            print("[Session] 尝试创建新的 OAT 进行续签...")
-            response = requests.post(create_oat_url, headers={"Cookie": old_cookie}, data={"label": "Auto Renew Bot"}, timeout=10)
+            print("[Session] 自动续签开始，清理旧的 OAT...")
+            # 1. 获取现有 OAT 列表
+            list_resp = requests.get(oats_api_url, headers={"Cookie": old_cookie}, timeout=10)
+            if list_resp.status_code == 200:
+                oats_data = list_resp.json()
+                if oats_data.get("success"):
+                    tickets = oats_data.get("tickets", [])
+                    for t in tickets:
+                        t_id = t.get("id")
+                        print(f"[Session] 清理旧 OAT (ID: {t_id})...")
+                        requests.delete(f"{oats_api_url}?id={t_id}", headers={"Cookie": old_cookie}, timeout=5)
+            
+            # 2. 创建新的 OAT
+            print("[Session] 尝试创建新的 OAT...")
+            response = requests.post(oats_api_url, headers={"Cookie": old_cookie}, data={"label": "Endra Auto Renew"}, timeout=10)
             if response.status_code == 200:
                 data = response.json()
                 if data.get("success"):
                     new_oat = data.get("ticket")
                     print(f"[Session] 成功获取新的OAT: {new_oat}")
+                    # 3. 使用新 OAT 登录
                     return self._login(oat=new_oat)
             print(f"[Session] 获取新OAT失败: {response.text}")
         except Exception as e:
@@ -145,7 +159,6 @@ class SessionManager:
                         self._cached_cookie = new_cookie
                         self._cookie_timestamp = time.time()
                         self._save_cache(new_cookie)
-                    # 无论续签是否成功，因为还没过期，都可以继续使用目前的或续签后的
                 return self._cached_cookie
             else:
                 print("[Session] 缓存cookie已过期，需要重新登录")
