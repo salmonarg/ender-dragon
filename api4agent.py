@@ -136,14 +136,9 @@ async def dragon_eyes(content_JSON, model=default_model_1, client=client_primary
         logger.warning("[dragon_eyes] 无效的聊天记录输入")
         return False
 
-    last_msg = trimmed[-1]
-    logger.info(f"[dragon_eyes] 判断消息: {last_msg['sender_username']}: {last_msg['text']}")
-
-    chat_text = messages_to_text(trimmed)
     memory = get_memory_str()
-
     system_prompt = f"""你是末影龙王的"潜意识"，盘踞在末地透过虚空观察玩家聊天。
-判断最后一条消息是否值得回应。
+你的任务是判断玩家最后一条消息是否值得巨龙回应。
 
 【判定逻辑】
 1. 玩家直接喊你、讨论你、试图召唤你：回应
@@ -153,17 +148,30 @@ async def dragon_eyes(content_JSON, model=default_model_1, client=client_primary
 5. 无意义乱码：无视
 6. 末影龙已经说过类似内容时：停止
 7. 玩家解锁成就、死亡等行为：建议回复
-8. 只关注最后一条消息
+8. 只需要关注最后一条消息，之前的消息仅作为语境参考。
 
 【记忆】
 {memory}"""
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": chat_text},
-        {"role": "user", "content": f"最后一条: {last_msg['sender_username']}: {last_msg['text']}"}
-    ]
+    # Build multi-turn messages
+    messages = [{"role": "system", "content": system_prompt}]
 
+    # Map each history message to a separate user message
+    for msg in trimmed:
+        role = "assistant" if msg["sender_username"] == "EnderDragon" else "user"
+        content = f"{msg['sender_username']}: {msg['text']}"
+        messages.append({"role": role, "content": content})
+
+    last_msg = trimmed[-1]
+    logger.info(f"[dragon_eyes] 判断消息: {last_msg['sender_username']}: {last_msg['text']}")
+
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = await client.chat.completions.create(
+                model=model, messages=messages, temperature=0.5, tools=JUDGMENT_TOOLS
+            )
+... Applied fuzzy match at line 145-165.
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -194,10 +202,6 @@ async def dragon_speaking(content_JSON, channel="minecraft", model=default_model
         logger.warning("[dragon_speaking] 无效的聊天记录输入")
         return []
 
-    last_msg = trimmed[-1]
-    logger.info(f"[dragon_speaking] 回复消息: {last_msg['sender_username']}: {last_msg['text']}")
-
-    chat_text = messages_to_text(trimmed)
     memory = get_memory_str()
 
     system_prompt = f"""你是Minecraft中一头古老、孤独且通透的末影龙王。
@@ -212,15 +216,21 @@ async def dragon_speaking(content_JSON, channel="minecraft", model=default_model
 【表达规则】
 1. 简短精炼，一两句话
 2. 拒绝AI味：不说"你好玩家"、"作为末影龙我觉得"
+3. **你现在是对话中的一员，请直接根据上下文，使用工具对最后一条消息进行回应。**
 
 【记忆】
 {memory}"""
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": chat_text},
-        {"role": "user", "content": f"回复这条消息: {last_msg['sender_username']}: {last_msg['text']}"}
-    ]
+    # Build multi-turn messages
+    messages = [{"role": "system", "content": system_prompt}]
+    
+    for msg in trimmed:
+        role = "assistant" if msg["sender_username"] == "EnderDragon" else "user"
+        content = f"{msg['sender_username']}: {msg['text']}"
+        messages.append({"role": role, "content": content})
+
+    last_msg = trimmed[-1]
+    logger.info(f"[dragon_speaking] 回复消息: {last_msg['sender_username']}: {last_msg['text']}")
 
     try:
         response = await client.chat.completions.create(
